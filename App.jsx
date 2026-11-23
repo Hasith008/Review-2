@@ -6,13 +6,14 @@ import {
   useLoginUserMutation,
   useRegisterUserMutation,
   useGetExchangeRatesQuery,
-} from './features/apiSlice';
+} from './apiSlice';
 
 function App() {
-  const [token, setToken] = useState(() => localStorage.getItem('token'));
+  const token = localStorage.getItem('token');
 
+  // API hooks
   const {
-    data: transactions = [],
+    data: rawTransactions = [],
     isLoading,
     error: fetchError,
     refetch,
@@ -20,11 +21,12 @@ function App() {
     skip: !token,
   });
 
-  const [addTransaction] = useAddTransactionMutation();
+  const [addTransaction, { isLoading: isAdding }] = useAddTransactionMutation();
   const [deleteTransaction] = useDeleteTransactionMutation();
-  const [loginUser] = useLoginUserMutation();
-  const [registerUser] = useRegisterUserMutation();
+  const [loginUser, { isLoading: isLoggingIn }] = useLoginUserMutation();
+  const [registerUser, { isLoading: isRegistering }] = useRegisterUserMutation();
 
+  // Third-party API hook for currency exchange rates (skipped if not logged in)
   const { data: exchangeData, isLoading: ratesLoading } = useGetExchangeRatesQuery(
     undefined,
     {
@@ -32,6 +34,14 @@ function App() {
     }
   );
 
+  // Normalize transactions array safely regardless of backend response shape
+  const transactions = Array.isArray(rawTransactions)
+    ? rawTransactions
+    : Array.isArray(rawTransactions?.transactions)
+      ? rawTransactions.transactions
+      : [];
+
+  // Local state
   const [isLoginMode, setIsLoginMode] = useState(true);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -39,58 +49,91 @@ function App() {
   const [text, setText] = useState('');
   const [amount, setAmount] = useState('');
   const [authError, setAuthError] = useState('');
+  const [actionError, setActionError] = useState('');
   const [selectedCurrency, setSelectedCurrency] = useState('EUR');
 
-  const txList = Array.isArray(transactions) ? transactions : [];
-  const totalAmount = txList.reduce((acc, tx) => acc + Number(tx.amount || 0), 0);
+  // Calculate total expenses and converted amounts
+  const totalAmount = transactions.reduce(
+    (acc, tx) => acc + (Number(tx?.amount) || 0),
+    0
+  );
   const rate = Number(exchangeData?.rates?.[selectedCurrency]) || 1;
   const convertedTotal = (totalAmount * rate).toFixed(2);
 
+  // Handle Authentication (Login / Register)
   const handleAuth = async (e) => {
     e.preventDefault();
     setAuthError('');
+
     try {
+      const trimmedEmail = email.trim();
       const res = isLoginMode
-        ? await loginUser({ email, password }).unwrap()
-        : await registerUser({ name, email, password }).unwrap();
+        ? await loginUser({ email: trimmedEmail, password }).unwrap()
+        : await registerUser({ name: name.trim(), email: trimmedEmail, password }).unwrap();
 
       if (res?.token) {
         localStorage.setItem('token', res.token);
-        setToken(res.token);
         refetch();
       } else {
-        setAuthError('Login succeeded, but no token was returned by the server.');
+        window.location.reload();
       }
     } catch (err) {
       setAuthError(
-        err?.data?.message || 'Authentication failed. Please check your details.'
+        err?.data?.message ||
+          err?.error ||
+          'Authentication failed. Please check your details.'
       );
     }
   };
 
   const handleLogout = () => {
     localStorage.removeItem('token');
-    setToken(null);
+    window.location.reload();
   };
 
+  // Handle Adding Expense
   const handleSubmitTransaction = async (e) => {
     e.preventDefault();
+    setActionError('');
+
+    const trimmedText = text.trim();
     const numericAmount = Number(amount);
-    if (!text.trim() || Number.isNaN(numericAmount)) return;
+
+    if (!trimmedText || Number.isNaN(numericAmount) || numericAmount <= 0) {
+      setActionError('Please enter a valid description and positive amount.');
+      return;
+    }
 
     try {
       await addTransaction({
-        text: text.trim(),
+        text: trimmedText,
         amount: numericAmount,
       }).unwrap();
       setText('');
       setAmount('');
     } catch (err) {
-      console.error('Failed to save transaction:', err);
+      setActionError(
+        err?.data?.message || 'Failed to save transaction. Please try again.'
+      );
     }
   };
 
+  // Handle Deleting Expense
+  const handleDeleteTransaction = async (id) => {
+    setActionError('');
+    try {
+      await deleteTransaction(id).unwrap();
+    } catch (err) {
+      setActionError(
+        err?.data?.message || 'Failed to delete transaction. Please try again.'
+      );
+    }
+  };
+
+  // If NOT logged in, show Auth Screen
   if (!token) {
+    const isSubmittingAuth = isLoggingIn || isRegistering;
+
     return (
       <div
         style={{
@@ -171,6 +214,7 @@ function App() {
           />
           <button
             type="submit"
+            disabled={isSubmittingAuth}
             style={{
               padding: '0.75rem',
               background: '#4CAF50',
@@ -178,10 +222,15 @@ function App() {
               border: 'none',
               borderRadius: '4px',
               fontWeight: 'bold',
-              cursor: 'pointer',
+              cursor: isSubmittingAuth ? 'not-allowed' : 'pointer',
+              opacity: isSubmittingAuth ? 0.7 : 1,
             }}
           >
-            {isLoginMode ? 'Login' : 'Register'}
+            {isSubmittingAuth
+              ? 'Please wait...'
+              : isLoginMode
+                ? 'Login'
+                : 'Register'}
           </button>
         </form>
 
@@ -189,10 +238,14 @@ function App() {
           {isLoginMode ? "Don't have an account?" : 'Already have an account?'}{' '}
           <span
             onClick={() => {
-              setAuthError('');
               setIsLoginMode(!isLoginMode);
+              setAuthError('');
             }}
-            style={{ color: '#4CAF50', cursor: 'pointer', textDecoration: 'underline' }}
+            style={{
+              color: '#4CAF50',
+              cursor: 'pointer',
+              textDecoration: 'underline',
+            }}
           >
             {isLoginMode ? 'Register here' : 'Login here'}
           </span>
@@ -211,6 +264,7 @@ function App() {
     );
   }
 
+  // If logged in, show Expense Tracker Dashboard
   return (
     <div
       style={{
@@ -266,6 +320,22 @@ function App() {
         </div>
       )}
 
+      {actionError && (
+        <div
+          style={{
+            color: '#ff6b6b',
+            background: '#2d1515',
+            padding: '0.75rem 1rem',
+            borderRadius: '6px',
+            marginBottom: '1.5rem',
+            border: '1px solid #ff6b6b',
+          }}
+        >
+          {actionError}
+        </div>
+      )}
+
+      {/* Third-Party Currency Conversion Widget */}
       <div
         style={{
           background: '#1e1e1e',
@@ -326,6 +396,7 @@ function App() {
         </div>
       </div>
 
+      {/* Add Transaction Form */}
       <form
         onSubmit={handleSubmitTransaction}
         style={{
@@ -354,6 +425,7 @@ function App() {
         />
         <input
           type="number"
+          step="0.01"
           placeholder="Amount"
           value={amount}
           onChange={(e) => setAmount(e.target.value)}
@@ -369,63 +441,71 @@ function App() {
         />
         <button
           type="submit"
+          disabled={isAdding}
           style={{
             padding: '0.5rem 1rem',
             background: '#4CAF50',
             color: 'white',
             border: 'none',
             borderRadius: '4px',
-            cursor: 'pointer',
+            cursor: isAdding ? 'not-allowed' : 'pointer',
             fontWeight: 'bold',
+            opacity: isAdding ? 0.7 : 1,
           }}
         >
-          Add
+          {isAdding ? 'Adding...' : 'Add'}
         </button>
       </form>
 
+      {/* Transactions List */}
       <h2>Transactions</h2>
       {isLoading && <p>Loading transactions...</p>}
 
-      {!isLoading && txList.length === 0 && !fetchError && (
+      {!isLoading && transactions.length === 0 && !fetchError && (
         <p style={{ color: '#888' }}>
           No transactions recorded yet. Add your first expense above!
         </p>
       )}
 
       <ul style={{ listStyle: 'none', padding: 0 }}>
-        {txList.map((tx) => (
-          <li
-            key={tx._id || tx.id}
-            style={{
-              background: '#1e1e1e',
-              padding: '0.75rem 1rem',
-              marginBottom: '0.5rem',
-              borderRadius: '6px',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              borderLeft: '4px solid #4CAF50',
-            }}
-          >
-            <span>{tx.text}</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-              <span style={{ fontWeight: 'bold' }}>${tx.amount}</span>
-              <button
-                onClick={() => deleteTransaction(tx._id || tx.id)}
-                style={{
-                  background: '#e53935',
-                  color: 'white',
-                  border: 'none',
-                  padding: '0.25rem 0.5rem',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                }}
-              >
-                X
-              </button>
-            </div>
-          </li>
-        ))}
+        {transactions.map((tx) => {
+          const txId = tx._id || tx.id;
+          return (
+            <li
+              key={txId}
+              style={{
+                background: '#1e1e1e',
+                padding: '0.75rem 1rem',
+                marginBottom: '0.5rem',
+                borderRadius: '6px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                borderLeft: '4px solid #4CAF50',
+              }}
+            >
+              <span>{tx.text}</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                <span style={{ fontWeight: 'bold' }}>
+                  ${Number(tx.amount).toFixed(2)}
+                </span>
+                <button
+                  onClick={() => handleDeleteTransaction(txId)}
+                  style={{
+                    background: '#e53935',
+                    color: 'white',
+                    border: 'none',
+                    padding: '0.25rem 0.5rem',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  X
+                </button>
+              </div>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
